@@ -35,8 +35,16 @@ private struct ConversationView: View {
     @ObservedObject var model: AppModel
     @Environment(\.interfaceLanguage) private var language
     @Environment(\.scenePhase) private var scenePhase
-    @State private var showingHistory = true
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var historyMode = HistoryMode.docked
+    @State private var overHistoryButton = false
+    @State private var overHistoryArea = false
+    @State private var trackingPreviewMenu = false
+    @State private var hoverTask: Task<Void, Never>?
     @State private var showingExitedAgents = false
+
+    private enum HistoryMode { case docked, collapsed, floating }
+    private let historyWidth: CGFloat = 219
 
     private var visibleAgents: [Agent] {
         showingExitedAgents ? model.conversationAgents.filter { !model.current.exitingAgents.contains($0.name) }
@@ -47,60 +55,113 @@ private struct ConversationView: View {
         VStack(spacing: 0) {
             header
             Divider()
-            HStack(spacing: 0) {
-                if showingHistory {
-                    HistorySidebar(model: model)
-                        .frame(width: 218)
-                    Divider()
-                }
-                VStack(spacing: 0) {
-                    if visibleAgents.isEmpty {
-                        VStack(spacing: 12) {
-                            Image(systemName: "bubble.left.and.bubble.right")
-                                .font(.system(size: 30, weight: .light))
-                                .foregroundStyle(.secondary)
-                            if model.conversationAgents.isEmpty {
-                                Text(language.text("启用 agent 开始对话", "Enable an agent to start a conversation"))
-                                    .font(.title3.weight(.semibold))
-                                Button(language.text("打开 Agent 设置", "Open Agent Settings"), action: model.openSettings)
-                                    .disabled(!model.canSwitchConversation)
-                            } else {
-                                Text(model.current.exitingAgents.isEmpty
-                                     ? language.text("所有 Agent 已退出", "All agents have left")
-                                     : language.text("正在退出 Agent…", "Removing agent…"))
-                                    .font(.title3.weight(.semibold))
-                            }
+            VStack(spacing: 0) {
+                if visibleAgents.isEmpty {
+                    VStack(spacing: 12) {
+                        Image(systemName: "bubble.left.and.bubble.right")
+                            .font(.system(size: 30, weight: .light))
+                            .foregroundStyle(.secondary)
+                        if model.conversationAgents.isEmpty {
+                            Text(language.text("启用 agent 开始对话", "Enable an agent to start a conversation"))
+                                .font(.title3.weight(.semibold))
+                            Button(language.text("打开 Agent 设置", "Open Agent Settings"), action: model.openSettings)
+                                .disabled(!model.canSwitchConversation)
+                        } else {
+                            Text(model.current.exitingAgents.isEmpty
+                                 ? language.text("所有 Agent 已退出", "All agents have left")
+                                 : language.text("正在退出 Agent…", "Removing agent…"))
+                                .font(.title3.weight(.semibold))
                         }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else {
-                        panes.id(model.current.id)
                     }
-                    Divider()
-                    composer.id(model.current.id)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    panes.id(model.current.id)
                 }
+                Divider()
+                composer.id(model.current.id)
             }
+            .padding(.leading, historyMode == .docked ? historyWidth : 0)
+            .overlay(alignment: .leading) {
+                HistorySidebar(model: model)
+                    .frame(width: historyWidth)
+                    .overlay(alignment: .trailing) { Color(nsColor: .separatorColor).frame(width: 1) }
+                    .shadow(color: .black.opacity(historyMode == .floating ? 0.16 : 0), radius: 6, x: 2)
+                    .offset(x: historyMode == .collapsed ? -historyWidth : 0)
+                    .disabled(historyMode == .collapsed)
+                    .allowsHitTesting(historyMode != .collapsed)
+                    .accessibilityHidden(historyMode == .collapsed)
+            }
+            .clipped()
+            .contentShape(Rectangle())
+            .onContinuousHover(perform: trackHistoryHover)
         }
         .background(Color(nsColor: .windowBackgroundColor))
-        .onChange(of: scenePhase) { _, phase in
-            if phase == .active && showingHistory { model.reloadHistory() }
+        .onChange(of: overHistoryButton || overHistoryArea || trackingPreviewMenu) { _, inside in
+            scheduleHistoryHover(inside)
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSMenu.didBeginTrackingNotification)) { _ in
+            if historyMode == .floating { trackingPreviewMenu = true }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSMenu.didEndTrackingNotification)) { _ in
+            trackingPreviewMenu = false
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                if historyMode == .docked { model.reloadHistory() }
+            } else {
+                hoverTask?.cancel()
+                if historyMode == .floating { setHistoryMode(.collapsed) }
+            }
+        }
+        .onDisappear { hoverTask?.cancel() }
         .onChange(of: model.current.id) {
             showingExitedAgents = !model.current.exitedAgents.isEmpty
         }
     }
 
+    private func setHistoryMode(_ mode: HistoryMode) {
+        hoverTask?.cancel()
+        let wasHidden = historyMode == .collapsed
+        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) { historyMode = mode }
+        if wasHidden && mode != .collapsed { model.reloadHistory() }
+    }
+
+    private func trackHistoryHover(_ phase: HoverPhase) {
+        let inside: Bool
+        switch phase {
+        case .active(let point):
+            let width = historyMode == .floating ? historyWidth : 12
+            inside = point.x >= 0 && point.x < width
+        case .ended:
+            inside = false
+        }
+        if inside != overHistoryArea { overHistoryArea = inside }
+    }
+
+    private func scheduleHistoryHover(_ inside: Bool) {
+        hoverTask?.cancel()
+        guard scenePhase == .active,
+              inside ? historyMode == .collapsed : historyMode == .floating else { return }
+        hoverTask = Task { @MainActor in
+            do { try await Task.sleep(for: .milliseconds(inside ? 140 : 280)) }
+            catch { return }
+            setHistoryMode(inside ? .floating : .collapsed)
+        }
+    }
+
     private var header: some View {
-        let historyToggle = showingHistory ? language.text("隐藏历史会话", "Hide History")
+        let historyToggle = historyMode == .docked ? language.text("隐藏历史会话", "Hide History")
             : language.text("显示历史会话", "Show History")
         return HStack(spacing: 11) {
             Button {
-                showingHistory.toggle()
-                if showingHistory { model.reloadHistory() }
+                setHistoryMode(historyMode == .docked ? .collapsed : .docked)
             } label: {
                 Label(historyToggle, systemImage: "sidebar.left")
                     .labelStyle(.iconOnly)
             }
-            .help(historyToggle)
+            .onHover { overHistoryButton = $0 }
+            .help(historyMode == .docked ? historyToggle : language.text(
+                "悬停预览历史会话，点击固定展开", "Hover to preview history, click to keep it open"))
 
             Button(action: model.chooseDirectory) {
                 Label(model.current.directory == "/" ? language.text("根目录", "Root") : URL(fileURLWithPath: model.current.directory).lastPathComponent,
