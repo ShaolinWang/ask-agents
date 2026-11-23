@@ -272,22 +272,11 @@ private struct ConversationView: View {
                 ImageAttachmentsRow(images: model.current.images, remove: model.removeImage)
             }
             HStack(alignment: .bottom, spacing: 14) {
-                ZStack(alignment: .topLeading) {
-                    PromptEditor(text: $session.prompt, focusRequest: model.focusRequest,
-                                 send: model.sendPrompt, allowImages: model.canAttachImages, addImages: model.addImages)
-                        .frame(height: 63)
-                    if model.current.prompt.isEmpty {
-                        Text(language.text("输入问题", "Ask a question"))
-                            .foregroundStyle(.tertiary)
-                            .font(.system(size: 15))
-                            .padding(.top, 8)
-                            .padding(.leading, 13)
-                            .allowsHitTesting(false)
-                            .accessibilityHidden(true)
-                    }
-                }
-                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
-                .overlay { RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary) }
+                PromptEditor(text: $session.prompt, focusRequest: model.focusRequest,
+                             send: model.sendPrompt, allowImages: model.canAttachImages, addImages: model.addImages)
+                    .frame(height: 63)
+                    .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                    .overlay { RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary) }
 
                 Button(action: model.chooseImages) {
                     Image(systemName: "paperclip")
@@ -656,6 +645,8 @@ private struct PromptEditor: NSViewRepresentable {
             editor.isAutomaticDashSubstitutionEnabled = false
             editor.textContainerInset = NSSize(width: 8, height: 8)
             editor.delegate = context.coordinator
+            NotificationCenter.default.addObserver(editor, selector: #selector(PromptTextView.textStorageDidEdit(_:)),
+                                                   name: NSTextStorage.didProcessEditingNotification, object: editor.textStorage)
             editor.registerForDraggedTypes(editor.registeredDraggedTypes + [.fileURL] + PromptTextView.imageTypes)
         }
         return scroll
@@ -665,6 +656,7 @@ private struct PromptEditor: NSViewRepresentable {
         context.coordinator.parent = self
         guard let editor = scroll.documentView as? PromptTextView else { return }
         editor.setAccessibilityLabel(language.text("问题", "Prompt"))
+        editor.placeholder = language.text("输入问题", "Ask a question")
         editor.addImages = allowImages ? addImages : nil
         if editor.string != text && !editor.hasMarkedText() { editor.string = text }
         if context.coordinator.focus != focusRequest {
@@ -701,6 +693,27 @@ private final class PromptTextView: NSTextView {
     ]
 
     var addImages: (([ImageAttachment.Source]) -> Void)?
+    var placeholder = "" {
+        didSet {
+            if oldValue != placeholder { needsDisplay = true }
+        }
+    }
+
+    @objc func textStorageDidEdit(_ notification: Notification) {
+        // Marked text can change before the input method commits an edit to the draft.
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard textStorage?.length == 0, !hasMarkedText() else { return }
+        var origin = textContainerOrigin
+        origin.x += textContainer?.lineFragmentPadding ?? 0
+        (placeholder as NSString).draw(at: origin, withAttributes: [
+            .font: font ?? NSFont.systemFont(ofSize: 15),
+            .foregroundColor: NSColor.placeholderTextColor,
+        ])
+    }
 
     override func paste(_ sender: Any?) {
         if let addImages, let images = Self.imageSources(from: .general) {
