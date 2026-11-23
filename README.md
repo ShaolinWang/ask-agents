@@ -51,6 +51,8 @@ In the app, select a conversation in **History** to reopen it. Use **New Convers
 
 While agents reply, you can start or open another conversation and send a prompt there. History shows which conversations are still responding. **Stop** affects only the selected conversation.
 
+Use a conversation’s **…** menu to pin, unpin, or delete it. Pinned conversations stay at the top of History. For bulk deletion, click **Select**, choose the conversations, then click **Delete** and confirm.
+
 The interactive views stream each agent's Markdown reply into its own pane and show the tool activity the CLI reports. In the app, use the circular arrow to retry the latest reply, or click **×** to remove that agent and stop its current reply.
 
 In the terminal, press Enter to send and Ctrl+J or Alt+Enter for a new line. Press Ctrl+C during a reply to cancel the turn and return to the input. Press Esc to browse, then Tab to switch panes, the arrow keys or Page Up and Page Down to scroll, Enter to return to your draft, or **q** to quit.

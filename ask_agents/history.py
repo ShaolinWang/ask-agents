@@ -48,6 +48,7 @@ class Summary:
     title: str
     cwd: str
     updated_at: float
+    pinned: bool = False
 
 
 @dataclass
@@ -58,6 +59,7 @@ class Conversation:
     exchanges: list[Exchange] = field(default_factory=list)
     saved_turns: int = 0
     exited_agents: set[str] = field(default_factory=set)
+    pin_on_first_save: bool = False
 
     @property
     def active_agents(self):
@@ -143,6 +145,9 @@ class History:
                     )
                 """)
                 db.execute("""
+                    CREATE TABLE IF NOT EXISTS conversation_pins (conversation_id TEXT PRIMARY KEY)
+                """)
+                db.execute("""
                     CREATE TABLE IF NOT EXISTS exchanges (
                         conversation_id TEXT NOT NULL, number INTEGER NOT NULL,
                         prompt TEXT NOT NULL, panes TEXT NOT NULL,
@@ -170,9 +175,31 @@ class History:
         if not self.path.exists():
             return []
         with self.database() as db:
-            return [Summary(*row) for row in db.execute("""
-                SELECT id, title, cwd, updated_at FROM conversations ORDER BY updated_at DESC, id
+            return [Summary(*fields, pinned=bool(pinned)) for *fields, pinned in db.execute("""
+                SELECT id, title, cwd, updated_at, p.conversation_id IS NOT NULL AS pinned
+                FROM conversations LEFT JOIN conversation_pins p ON p.conversation_id = id
+                ORDER BY pinned DESC, updated_at DESC, id
             """)]
+
+    def set_pinned(self, conversation_id, pinned):
+        with self.database() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if not db.execute("SELECT 1 FROM conversations WHERE id = ?", (conversation_id,)).fetchone():
+                raise ValueError(tr("找不到该历史会话", "Conversation not found"))
+            if pinned:
+                db.execute("INSERT OR IGNORE INTO conversation_pins VALUES (?)", (conversation_id,))
+            else:
+                db.execute("DELETE FROM conversation_pins WHERE conversation_id = ?", (conversation_id,))
+
+    def _is_pinned(self, db, conversation_id):
+        return db.execute("SELECT 1 FROM conversation_pins WHERE conversation_id = ?", (conversation_id,)).fetchone() is not None
+
+    def delete(self, conversation_ids):
+        rows = [(key,) for key in conversation_ids]
+        with self.database() as db:
+            for table in ("conversation_pins", "exchange_images", "exited_agents", "exchanges"):
+                db.executemany(f"DELETE FROM {table} WHERE conversation_id = ?", rows)
+            db.executemany("DELETE FROM conversations WHERE id = ?", rows)
 
     def open(self, key):
         key = key.lower()
@@ -216,7 +243,9 @@ class History:
     def save_exits(self, conversation):
         if conversation.saved_turns:
             with self.database() as db:
-                self._write_exits(db, conversation)
+                db.execute("BEGIN IMMEDIATE")
+                if db.execute("SELECT 1 FROM conversations WHERE id = ?", (conversation.id,)).fetchone():
+                    self._write_exits(db, conversation)
 
     def summary(self, conversation):
         first_line = conversation.exchanges[0].display_prompt.strip().splitlines()[0]
@@ -257,6 +286,7 @@ class History:
             db.execute("""
                 UPDATE exchanges SET panes = ? WHERE conversation_id = ? AND number = ?
             """, (json.dumps(panes), summary.id, number))
+            summary.pinned = self._is_pinned(db, conversation.id)
         exchange.replace_reply(pane)
         return summary
 
@@ -280,6 +310,8 @@ class History:
                     VALUES (?, ?, ?, ?, ?, 0)
                 """, (summary.id, summary.title, summary.cwd,
                       json.dumps([asdict(agent) for agent in conversation.agents]), summary.updated_at))
+                if conversation.pin_on_first_save:
+                    db.execute("INSERT INTO conversation_pins VALUES (?)", (conversation.id,))
             updated = db.execute("""
                 UPDATE conversations SET updated_at = ?, turns = ? WHERE id = ? AND turns = ?
             """, (summary.updated_at, total, summary.id, previous))
@@ -295,5 +327,6 @@ class History:
                 for position, image in enumerate(exchange.images)
             ))
             self._write_exits(db, conversation)
+            summary.pinned = self._is_pinned(db, conversation.id)
         conversation.saved_turns = total
         return summary

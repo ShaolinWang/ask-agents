@@ -77,9 +77,12 @@ final class AppModel: ObservableObject {
     }
     var history: [HistoryItem] {
         let provisional = sessions.values.compactMap(\.provisionalItem)
-        guard !provisional.isEmpty else { return savedHistory }
         let ids = Set(provisional.map(\.id))
-        return (provisional + savedHistory.filter { !ids.contains($0.id) }).sorted { $0.updatedAt > $1.updatedAt }
+        return (provisional + savedHistory.filter { !ids.contains($0.id) }).sorted {
+            if $0.pinned != $1.pinned { return $0.pinned }
+            if $0.updatedAt != $1.updatedAt { return $0.updatedAt > $1.updatedAt }
+            return $0.id < $1.id
+        }
     }
 
     func isResponding(in id: String) -> Bool { sessions[id]?.isResponding == true }
@@ -187,6 +190,45 @@ final class AppModel: ObservableObject {
         request(Request(action: "history")) { [weak self] event in
             if let history = event.history { self?.savedHistory = history }
             if let message = event.message { self?.current.error = message }
+        }
+    }
+
+    func setPinned(_ pinned: Bool, for id: String) {
+        guard canSwitchConversation else { return }
+        request(Request(action: "setPinned", conversationID: id, pinned: pinned)) { [weak self] event in
+            guard let self else { return }
+            guard event.kind == "result" else {
+                current.error = event.message ?? language.text("无法更新置顶状态", "Could not update the pin")
+                return
+            }
+            sessions[id]?.provisionalItem?.pinned = pinned
+            if let index = savedHistory.firstIndex(where: { $0.id == id }) {
+                savedHistory[index].pinned = pinned
+            }
+        }
+    }
+
+    func deleteHistory(_ ids: Set<String>) {
+        guard canSwitchConversation, !ids.isEmpty else { return }
+        switchingConversation = true
+        request(Request(action: "deleteHistory", conversationIDs: Array(ids))) { [weak self] event in
+            guard let self else { return }
+            switchingConversation = false
+            guard event.kind == "result" else {
+                current.error = event.message ?? language.text("无法删除历史会话", "Could not delete conversations")
+                return
+            }
+            for id in ids {
+                sessions.removeValue(forKey: id)
+                drafts.removeValue(forKey: id)
+            }
+            savedHistory.removeAll { ids.contains($0.id) }
+            if ids.contains(current.id) {
+                let next = ConversationState(directory: current.directory)
+                current = next
+                sessions[next.id] = next
+                focusRequest += 1
+            }
         }
     }
 

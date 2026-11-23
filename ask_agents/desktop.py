@@ -272,6 +272,24 @@ class Desktop:
             "installed": [cli for cli in CLIS if shutil.which(cli)],
         }
 
+    async def delete_history(self, ids):
+        if not isinstance(ids, list) or not ids or not all(
+            isinstance(key, str) and re.fullmatch(r"[0-9a-f]{32}", key) for key in ids
+        ):
+            raise ValueError(tr("请选择要删除的会话", "Select conversations to delete"))
+        targets = set(ids)
+        sessions = {key: live for key, live in self.sessions.items()
+                    if key in targets or (live.conversation and live.conversation.id in targets)}
+        # Drain cancelled turns before deleting, since their final replies are saved to history.
+        tasks = [task for live in sessions.values() for task in live.running_turns()]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(*(live.close_sessions() for live in sessions.values()))
+        self.history.delete(targets)
+        for key in sessions:
+            del self.sessions[key]
+
     async def reply(self, request, session):
         try:
             action = request["action"]
@@ -279,6 +297,19 @@ class Desktop:
                 self.send(request, "result", **self.configuration())
             elif action == "history":
                 self.send(request, "result", history=[asdict(item) for item in self.history.list()])
+            elif action == "setPinned":
+                key, pinned = request["conversationID"], request["pinned"]
+                if not isinstance(pinned, bool):
+                    raise ValueError(tr("无效的置顶状态", "Invalid pin state"))
+                live = self.sessions.get(key)
+                if live and live.conversation and live.conversation.saved_turns == 0:
+                    live.conversation.pin_on_first_save = pinned
+                else:
+                    self.history.set_pinned(key, pinned)
+                self.send(request, "result")
+            elif action == "deleteHistory":
+                await self.delete_history(request["conversationIDs"])
+                self.send(request, "result")
             elif action == "openHistory":
                 if session.running_turns():
                     raise ValueError(tr(

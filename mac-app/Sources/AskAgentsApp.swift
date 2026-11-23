@@ -264,12 +264,32 @@ private struct HistorySidebar: View {
     @ObservedObject var model: AppModel
     @Environment(\.interfaceLanguage) private var language
 
+    @State private var selecting = false
+    @State private var selection: Set<String> = []
+    @State private var deletion: Deletion?
+
+    private struct Deletion: Identifiable {
+        let id = UUID()
+        let items: [HistoryItem]
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(language.text("历史会话", "History"))
-                .font(.headline)
-                .padding(.horizontal, 15)
-            if model.history.isEmpty {
+        let items = model.history
+        let ids = Set(items.map(\.id))
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(language.text("历史会话", "History")).font(.headline)
+                Spacer()
+                if !items.isEmpty {
+                    Button(selecting ? language.text("完成", "Done") : language.text("选择", "Select")) {
+                        selection.removeAll()
+                        selecting.toggle()
+                    }
+                    .buttonStyle(.link)
+                }
+            }
+            .padding(.horizontal, 15)
+            if items.isEmpty {
                 Text(language.text("暂无历史会话", "No conversations yet"))
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -277,53 +297,123 @@ private struct HistorySidebar: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 3) {
-                        ForEach(model.history) { item in
-                            row(item)
-                        }
+                        ForEach(items) { item in row(item) }
                     }
                     .padding(.horizontal, 8)
                     .compactEnclosingScrollIndicators()
                 }
             }
             Spacer(minLength: 0)
+            if selecting {
+                Divider()
+                HStack {
+                    Button(selection == ids ? language.text("取消全选", "Deselect All") : language.text("全选", "Select All")) {
+                        selection = selection == ids ? [] : ids
+                    }
+                    Spacer()
+                    Button(role: .destructive) {
+                        deletion = Deletion(items: items.filter { selection.contains($0.id) })
+                    } label: {
+                        Label(language.text("删除 (\(selection.count))", "Delete (\(selection.count))"), systemImage: "trash")
+                    }
+                    .disabled(selection.isEmpty || !model.canSwitchConversation)
+                }
+                .controlSize(.small)
+                .padding([.horizontal, .bottom], 12)
+            }
         }
         .padding(.top, 15)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color(nsColor: .controlBackgroundColor))
+        .onChange(of: ids) {
+            selection.formIntersection(ids)
+            if ids.isEmpty { selecting = false }
+        }
+        .alert(item: $deletion) { target in
+            let count = target.items.count
+            let title = count == 1
+                ? language.text("删除「\(target.items[0].title)」？", "Delete “\(target.items[0].title)”?")
+                : language.text("删除选中的 \(count) 个会话？", "Delete \(count) selected conversations?")
+            let message = language.text("消息和附件将被永久删除。", "Messages and attachments will be permanently deleted.")
+            let stopping = target.items.contains { model.isResponding(in: $0.id) }
+                ? language.text("所选会话中正在生成的回复也会停止。", " Active replies in the selected conversations will also stop.") : ""
+            return Alert(title: Text(verbatim: title), message: Text(verbatim: message + stopping),
+                         primaryButton: .destructive(Text(language.text("删除", "Delete"))) {
+                             model.deleteHistory(Set(target.items.map(\.id)))
+                         }, secondaryButton: .cancel(Text(language.text("取消", "Cancel"))))
+        }
+    }
+
+    @ViewBuilder
+    private func actions(_ item: HistoryItem) -> some View {
+        Button { model.setPinned(!item.pinned, for: item.id) } label: {
+            Label(item.pinned ? language.text("取消置顶", "Unpin") : language.text("置顶", "Pin"),
+                  systemImage: item.pinned ? "pin.slash" : "pin")
+        }
+        Divider()
+        Button(role: .destructive) { deletion = Deletion(items: [item]) } label: {
+            Label(language.text("删除…", "Delete…"), systemImage: "trash")
+        }
     }
 
     private func row(_ item: HistoryItem) -> some View {
-        let selected = model.current.id == item.id
+        let selected = selecting ? selection.contains(item.id) : model.current.id == item.id
         let folder = item.cwd == "/" ? language.text("根目录", "Root") : URL(fileURLWithPath: item.cwd).lastPathComponent
-        return Button { model.openHistory(item) } label: {
-            VStack(alignment: .leading, spacing: 4) {
+        return HStack(spacing: 4) {
+            Button {
+                if selecting {
+                    if selection.remove(item.id) == nil { selection.insert(item.id) }
+                } else {
+                    model.openHistory(item)
+                }
+            } label: {
                 HStack(spacing: 6) {
-                    Text(verbatim: item.title)
-                        .font(.callout.weight(selected ? .semibold : .regular))
-                        .lineLimit(2)
-                    if model.isResponding(in: item.id) {
-                        ProgressView().controlSize(.small)
-                            .accessibilityLabel(language.text("正在回复", "Responding"))
+                    if selecting {
+                        Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                            .foregroundStyle(selected ? Color.accentColor : .secondary)
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 4) {
+                            if item.pinned {
+                                Image(systemName: "pin.fill").font(.caption2)
+                                    .accessibilityLabel(language.text("已置顶", "Pinned"))
+                            }
+                            Text(verbatim: item.title)
+                                .font(.callout.weight(selected ? .semibold : .regular)).lineLimit(2)
+                            if model.isResponding(in: item.id) {
+                                ProgressView().controlSize(.small)
+                                    .accessibilityLabel(language.text("正在回复", "Responding"))
+                            }
+                        }
+                        HStack(spacing: 4) {
+                            Text(verbatim: folder).lineLimit(1)
+                            Spacer(minLength: 0)
+                            Text(Date(timeIntervalSince1970: item.updatedAt), format: .dateTime.month().day().hour().minute())
+                        }
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                     }
                 }
-                HStack(spacing: 6) {
-                    Text(verbatim: folder).lineLimit(1)
-                    Spacer(minLength: 0)
-                    Text(Date(timeIntervalSince1970: item.updatedAt), format: .dateTime.month().day().hour().minute())
-                }
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(8)
-            .background(selected ? Color.accentColor.opacity(0.16) : Color.clear,
-                        in: RoundedRectangle(cornerRadius: 6))
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+            .accessibilityAddTraits(selected ? .isSelected : [])
+            .help("\(item.title)\n\(item.cwd)")
+            if !selecting {
+                Menu { actions(item) } label: {
+                    Image(systemName: "ellipsis")
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .accessibilityLabel(language.text("会话操作", "Conversation actions"))
+            }
         }
-        .buttonStyle(.plain)
+        .padding(8)
+        .background(selected ? Color.accentColor.opacity(0.16) : Color.clear, in: RoundedRectangle(cornerRadius: 6))
+        .contextMenu { if !selecting { actions(item) } }
         .disabled(!model.canSwitchConversation)
-        .accessibilityAddTraits(selected ? .isSelected : [])
-        .help("\(item.title)\n\(item.cwd)")
     }
 }
 

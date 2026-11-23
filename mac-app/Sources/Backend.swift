@@ -45,9 +45,10 @@ struct HistoryItem: Decodable, Identifiable {
     let title: String
     let cwd: String
     let updatedAt: Double
+    var pinned = false
 
     enum CodingKeys: String, CodingKey {
-        case id, title, cwd
+        case id, title, cwd, pinned
         case updatedAt = "updated_at"
     }
 }
@@ -103,6 +104,8 @@ struct Request: Encodable {
     var conversationID: String?
     var agentName: String?
     var sessionID: String?
+    var conversationIDs: [String]?
+    var pinned: Bool?
 }
 
 struct Event: Decodable {

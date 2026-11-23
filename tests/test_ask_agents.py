@@ -20,6 +20,7 @@ from contextlib import asynccontextmanager, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+from ask_agents.attachments import ImageAttachment
 from ask_agents.config import Agent, read_config
 from ask_agents.history import Conversation, Exchange, History
 from ask_agents.runners import Activity, AgentConversation, Pane, command
@@ -509,6 +510,82 @@ class AskAgentsTest(unittest.TestCase):
         os.write(master, b"q")
         self.assertTrue(read_until("── first ──".encode(), b"resumed-alpha-done\r\n"), received[-1000:])
         self.assertEqual(child.wait(timeout=5), 1)
+
+    def test_history_pins_and_atomic_deletion_with_attachments(self):
+        history = History(self.config)
+        agent = Agent("first", "codex")
+        image = ImageAttachment.from_data("test.png", base64.b64decode(PNG))
+        first, second, keep = [Conversation(self.cwd, (agent,)) for _ in range(3)]
+        for conversation in (first, second, keep):
+            history.record(conversation, Exchange(PROMPT, [Pane(agent.name, "alpha")], (image,)))
+        first.exited_agents.add(agent.name)
+        history.save_exits(first)
+        history.set_pinned(first.id, True)
+        history.set_pinned(first.id, True)
+        reopened = History(self.config)
+        self.assertEqual([(item.id, item.pinned) for item in reopened.list()],
+                         [(first.id, True), (keep.id, False), (second.id, False)])
+        self.assertTrue(history.replace_latest_reply(first, Pane(agent.name, "beta")).pinned)
+        self.assertTrue(history.record(first, Exchange(FOLLOW_UP, [])).pinned)
+        history.set_pinned(first.id, False)
+        history.set_pinned(second.id, True)
+        self.assertEqual(reopened.list()[0].id, second.id)
+
+        with history.database() as db:
+            db.execute("""CREATE TRIGGER fail_delete BEFORE DELETE ON conversations
+                          BEGIN SELECT RAISE(ABORT, 'cannot delete'); END""")
+        with self.assertRaisesRegex(ValueError, "cannot delete"):
+            history.delete([first.id, second.id])
+        self.assertEqual(history.open(first.id).exchanges[0].images, (image,))
+        self.assertEqual(history.open(first.id).exited_agents, {agent.name})
+        self.assertTrue(history.list()[0].pinned)
+        with history.database() as db:
+            db.execute("DROP TRIGGER fail_delete")
+
+        reopened.delete([first.id, second.id])
+        reopened.delete([first.id])
+        history.save_exits(first)
+        self.assertEqual([item.id for item in history.list()], [keep.id])
+        with history.database() as db:
+            for table in ("conversation_pins", "exchanges", "exchange_images", "exited_agents"):
+                self.assertFalse(db.execute(f"SELECT 1 FROM {table} WHERE conversation_id IN (?, ?)",
+                                            (first.id, second.id)).fetchall())
+        self.assertEqual(history.open(keep.id).exchanges[0].images, (image,))
+
+    def test_desktop_deletes_selected_sessions_while_other_replies_continue(self):
+        self.configure("first", "codex", "alpha")
+        agents = json.loads(self.config.read_text())["agents"]
+        history = History(self.config)
+        saved = Conversation(self.cwd, (Agent("first", "codex"),))
+        history.record(saved, Exchange(PROMPT, []))
+        release = self.cwd / "release"
+        first, second = "a" * 32, "b" * 32
+
+        async def exercise():
+            async with self.desktop(RELEASE_FILE=str(release)) as (send, receive):
+                for number, key in enumerate((first, second), 1):
+                    await send(number, "ask", sessionID=key, agents=agents, cwd=str(self.cwd), prompt=PROMPT, timeout=8)
+                    await receive(lambda e: e["kind"] == "panes" and e["panes"][0]["entries"], request_id=number)
+                await send(3, "setPinned", conversationID=second, pinned=True)
+                await receive(lambda e: e["kind"] == "result", request_id=3)
+                await send(4, "deleteHistory", conversationIDs=[saved.id, first[:4]])
+                self.assertEqual((await receive(lambda e: True, request_id=4, allow_error=True))["kind"], "error")
+                self.assertEqual(history.open(saved.id).id, saved.id)
+                await send(5, "deleteHistory", conversationIDs=[first, saved.id])
+                await receive(lambda e: e["kind"] == "result", request_id=5)
+                self.assertEqual(history.list(), [])
+                release.touch()
+                finished = await receive(lambda e: e["kind"] == "result", request_id=2)
+                self.assertTrue(finished["historyItem"]["pinned"])
+                self.assertEqual(history.open(second).exchanges[0].reply("first").status, "完成")
+                await send(6, "setPinned", conversationID=second, pinned=False)
+                await receive(lambda e: e["kind"] == "result", request_id=6)
+                self.assertFalse(history.list()[0].pinned)
+                await send(7, "deleteHistory", conversationIDs=[second])
+                await receive(lambda e: e["kind"] == "result", request_id=7)
+
+        asyncio.run(exercise())
+        self.assertEqual(history.list(), [])
 
     def test_saved_reply_does_not_change_when_retry_cannot_write_history(self):
         history = History(self.config)
