@@ -121,3 +121,7 @@ python3 -B -m unittest discover -s tests -v
 ```
 
 测试使用本地模拟 CLI，无需登录模型服务。
+
+## 许可证
+
+Ask Agents 采用 [MIT 许可证](LICENSE)。

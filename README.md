@@ -121,3 +121,7 @@ python3 -B -m unittest discover -s tests -v
 ```
 
 The tests use local CLI fixtures and run without provider credentials.
+
+## License
+
+Ask Agents is distributed under the [MIT License](LICENSE).
