@@ -49,6 +49,8 @@ If you have Codex and Claude Code installed, this sends the same question to bot
 
 In the app, select a conversation in **History** to reopen it. Use **New Conversation** to start with all enabled agents, or choose one agent from its menu. Changing the workspace also starts a new conversation.
 
+While agents reply, you can start or open another conversation and send a prompt there. History shows which conversations are still responding. **Stop** affects only the selected conversation.
+
 The interactive views stream each agent's Markdown reply into its own pane and show the tool activity the CLI reports. In the app, use the circular arrow to retry the latest reply, or click **×** to remove that agent and stop its current reply.
 
 In the terminal, press Enter to send and Ctrl+J or Alt+Enter for a new line. Press Ctrl+C during a reply to cancel the turn and return to the input. Press Esc to browse, then Tab to switch panes, the arrow keys or Page Up and Page Down to scroll, Enter to return to your draft, or **q** to quit.

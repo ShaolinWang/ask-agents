@@ -102,11 +102,13 @@ struct Request: Encodable {
     var timeout: Double?
     var conversationID: String?
     var agentName: String?
+    var sessionID: String?
 }
 
 struct Event: Decodable {
     let id: Int
     let kind: String
+    var sessionID: String?
     var message: String?
     var agents: [Agent]?
     var configPath: String?

@@ -39,7 +39,7 @@ private struct ConversationView: View {
     @State private var showingExitedAgents = false
 
     private var visibleAgents: [Agent] {
-        showingExitedAgents ? model.conversationAgents.filter { !model.exitingAgents.contains($0.name) }
+        showingExitedAgents ? model.conversationAgents.filter { !model.current.exitingAgents.contains($0.name) }
             : model.participatingAgents
     }
 
@@ -65,7 +65,7 @@ private struct ConversationView: View {
                                 Button(language.text("打开 Agent 设置", "Open Agent Settings"), action: model.openSettings)
                                     .disabled(!model.canSwitchConversation)
                             } else {
-                                Text(model.exitingAgents.isEmpty
+                                Text(model.current.exitingAgents.isEmpty
                                      ? language.text("所有 Agent 已退出", "All agents have left")
                                      : language.text("正在退出 Agent…", "Removing agent…"))
                                     .font(.title3.weight(.semibold))
@@ -73,10 +73,10 @@ private struct ConversationView: View {
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else {
-                        panes.id(model.conversationViewID)
+                        panes.id(model.current.id)
                     }
                     Divider()
-                    composer
+                    composer.id(model.current.id)
                 }
             }
         }
@@ -84,8 +84,8 @@ private struct ConversationView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active && showingHistory { model.reloadHistory() }
         }
-        .onChange(of: model.conversationViewID) {
-            showingExitedAgents = !model.exitedAgents.isEmpty
+        .onChange(of: model.current.id) {
+            showingExitedAgents = !model.current.exitedAgents.isEmpty
         }
     }
 
@@ -103,24 +103,24 @@ private struct ConversationView: View {
             .help(historyToggle)
 
             Button(action: model.chooseDirectory) {
-                Label(model.directory == "/" ? language.text("根目录", "Root") : URL(fileURLWithPath: model.directory).lastPathComponent,
+                Label(model.current.directory == "/" ? language.text("根目录", "Root") : URL(fileURLWithPath: model.current.directory).lastPathComponent,
                       systemImage: "folder")
                     .lineLimit(1)
             }
             .help(language.text("选择项目目录", "Choose Workspace"))
             .disabled(!model.canSwitchConversation)
 
-            Text((model.directory as NSString).abbreviatingWithTildeInPath)
+            Text((model.current.directory as NSString).abbreviatingWithTildeInPath)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .font(.callout)
             Spacer()
-            if !model.exitedAgents.isEmpty {
+            if !model.current.exitedAgents.isEmpty {
                 Button {
                     showingExitedAgents.toggle()
                 } label: {
-                    Label(language.text("已退出 \(model.exitedAgents.count)", "\(model.exitedAgents.count) left"),
+                    Label(language.text("已退出 \(model.current.exitedAgents.count)", "\(model.current.exitedAgents.count) left"),
                           systemImage: showingExitedAgents ? "eye.fill" : "eye")
                 }
                 .help(showingExitedAgents
@@ -177,8 +177,8 @@ private struct ConversationView: View {
             ScrollView(.horizontal) {
                 HStack(spacing: 12) {
                     ForEach(agents) { agent in
-                        AgentPane(agent: agent, exchanges: model.exchanges,
-                                  exited: model.exitedAgents.contains(agent.name),
+                        AgentPane(agent: agent, exchanges: model.current.exchanges,
+                                  exited: model.current.exitedAgents.contains(agent.name),
                                   canExit: model.canExitAgent(agent.name),
                                   canRetry: model.canRetryAgent(agent.name),
                                   onRetry: { model.retryAgent(agent.name) },
@@ -198,23 +198,24 @@ private struct ConversationView: View {
     }
 
     private var composer: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if !model.error.isEmpty {
-                Label(model.error, systemImage: "exclamationmark.circle")
+        @Bindable var session = model.current
+        return VStack(alignment: .leading, spacing: 8) {
+            if !model.current.error.isEmpty {
+                Label(model.current.error, systemImage: "exclamationmark.circle")
                     .font(.callout)
                     .foregroundStyle(.red)
                     .textSelection(.enabled)
                     .accessibilityIdentifier("conversation-error")
             }
-            if !model.images.isEmpty {
-                ImageAttachmentsRow(images: model.images, remove: model.removeImage)
+            if !model.current.images.isEmpty {
+                ImageAttachmentsRow(images: model.current.images, remove: model.removeImage)
             }
             HStack(alignment: .bottom, spacing: 14) {
                 ZStack(alignment: .topLeading) {
-                    PromptEditor(text: $model.prompt, focusRequest: model.focusRequest,
+                    PromptEditor(text: $session.prompt, focusRequest: model.focusRequest,
                                  send: model.sendPrompt, allowImages: model.canAttachImages, addImages: model.addImages)
                         .frame(height: 63)
-                    if model.prompt.isEmpty {
+                    if model.current.prompt.isEmpty {
                         Text(language.text("输入问题", "Ask a question"))
                             .foregroundStyle(.tertiary)
                             .font(.system(size: 15))
@@ -235,12 +236,12 @@ private struct ConversationView: View {
                 .help(language.text("添加图片，也可粘贴或拖入输入框", "Add images, or paste or drop them in the prompt"))
                 .accessibilityLabel(language.text("添加图片", "Add Images"))
 
-                if model.isResponding {
+                if model.current.isResponding {
                     Button(action: model.cancel) {
-                        Label(model.stopping ? language.text("正在停止…", "Stopping…") : language.text("停止", "Stop"),
+                        Label(model.current.stopping ? language.text("正在停止…", "Stopping…") : language.text("停止", "Stop"),
                               systemImage: "stop.fill")
                     }
-                    .disabled(model.stopping)
+                    .disabled(model.current.stopping)
                     .controlSize(.large)
                 } else {
                     Button(action: model.sendPrompt) { Label(language.text("发送", "Send"), systemImage: "arrow.up") }
@@ -292,13 +293,19 @@ private struct HistorySidebar: View {
     }
 
     private func row(_ item: HistoryItem) -> some View {
-        let selected = model.selectedHistoryID == item.id
+        let selected = model.current.id == item.id
         let folder = item.cwd == "/" ? language.text("根目录", "Root") : URL(fileURLWithPath: item.cwd).lastPathComponent
         return Button { model.openHistory(item) } label: {
             VStack(alignment: .leading, spacing: 4) {
-                Text(verbatim: item.title)
-                    .font(.callout.weight(selected ? .semibold : .regular))
-                    .lineLimit(2)
+                HStack(spacing: 6) {
+                    Text(verbatim: item.title)
+                        .font(.callout.weight(selected ? .semibold : .regular))
+                        .lineLimit(2)
+                    if model.isResponding(in: item.id) {
+                        ProgressView().controlSize(.small)
+                            .accessibilityLabel(language.text("正在回复", "Responding"))
+                    }
+                }
                 HStack(spacing: 6) {
                     Text(verbatim: folder).lineLimit(1)
                     Spacer(minLength: 0)

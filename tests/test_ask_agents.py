@@ -244,6 +244,55 @@ class AskAgentsTest(unittest.TestCase):
         self.assertNotIn(b"\x1b[?2004h", received)
         self.assertFalse(json.loads(self.config.read_text())["agents"][0]["enabled"])
 
+    def test_desktop_conversations_stream_and_cancel_independently(self):
+        self.configure("first", "codex", "alpha")
+        agents = json.loads(self.config.read_text())["agents"]
+        release = self.cwd / "release"
+        first, second = "a" * 32, "b" * 32
+
+        async def exercise():
+            async with self.desktop(RELEASE_FILE=str(release)) as (send, receive):
+                async def ask(request_id, session_id, prompt=PROMPT):
+                    await send(request_id, "ask", sessionID=session_id, agents=agents,
+                               cwd=str(self.cwd), prompt=prompt, timeout=8)
+
+                async def streaming(request_id, session_id):
+                    event = await receive(lambda e: e["kind"] == "panes" and e["panes"][0]["entries"],
+                                          request_id=request_id)
+                    self.assertEqual(event["sessionID"], session_id)
+                    self.assertEqual(event["panes"][0]["entries"], [{"text": "delta-alpha"}])
+
+                await ask(1, first)
+                await streaming(1, first)
+                await send(2, "reset", sessionID=second)
+                await receive(lambda e: e["kind"] == "result", request_id=2)
+                await ask(3, second)
+                await streaming(3, second)
+                await ask(4, first)
+                rejected = await receive(lambda e: True, request_id=4, allow_error=True)
+                self.assertEqual(rejected["kind"], "error")
+
+                await send(5, "cancel", sessionID=first)
+                cancelled = await receive(lambda e: e["kind"] == "cancelled", request_id=1)
+                self.assertEqual(cancelled["historyItem"]["id"], first)
+                await send(6, "closeSession", sessionID=first)
+                await receive(lambda e: e["kind"] == "result", request_id=6)
+                await send(7, "openHistory", sessionID=first, conversationID=first)
+                reopened = await receive(lambda e: e["kind"] == "result", request_id=7)
+                self.assertEqual(reopened["exchanges"][0]["panes"][0]["status"], "已取消")
+
+                release.touch()
+                finished = await receive(lambda e: e["kind"] == "result", request_id=3)
+                self.assertEqual(finished["historyItem"]["id"], second)
+                await ask(8, second, FOLLOW_UP)
+                await receive(lambda e: e["kind"] == "result", request_id=8)
+
+        asyncio.run(exercise())
+        history = History(self.config)
+        self.assertEqual([turn.reply("first").text for turn in history.open(first).exchanges], ["delta-alpha"])
+        self.assertEqual([turn.reply("first").text for turn in history.open(second).exchanges],
+                         ["delta-alpha-done", "context-alpha-done"])
+
     def test_desktop_exits_one_agent_without_interrupting_the_others(self):
         self.configure("first", "codex", "alpha")
         self.configure("second", "traex", "beta")

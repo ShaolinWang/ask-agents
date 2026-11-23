@@ -56,32 +56,16 @@ def snapshot(pane):
     }
 
 
-class Desktop:
-    def __init__(self):
-        self.path = config_path()
-        self.history = History(self.path)
+class DesktopSession:
+    def __init__(self, history, send):
+        self.history = history
+        self.send = send
         self.conversation = None
         self.sessions = {}
         self.turn = None
         self.current_exchange = None
         self.turn_tasks = {}
         self.retries = {}
-        self.catalogs = set()
-        self.output_open = True
-
-    def send(self, request, kind, **fields):
-        if self.output_open:
-            try:
-                print(json.dumps({"id": request["id"], "kind": kind, **fields}, ensure_ascii=True), flush=True)
-            except BrokenPipeError:
-                self.output_open = False
-
-    def configuration(self):
-        return {
-            "agents": [asdict(agent) for agent in read_config(self.path)],
-            "configPath": str(self.path),
-            "installed": [cli for cli in CLIS if shutil.which(cli)],
-        }
 
     async def close_sessions(self):
         sessions, self.sessions = self.sessions, {}
@@ -133,9 +117,14 @@ class Desktop:
         prompt = checked_prompt(request.get("prompt", ""), images)
         timeout = self.timeout(request)
 
-        if self.conversation is None or (agents, cwd) != (self.conversation.agents, self.conversation.cwd):
+        if self.conversation and (agents, cwd) != (self.conversation.agents, self.conversation.cwd):
+            if "sessionID" in request:
+                raise ValueError(tr("会话配置不匹配", "Conversation settings do not match"))
             await self.close_sessions()
-            self.conversation = Conversation(cwd, agents)
+            self.conversation = None
+        if self.conversation is None:
+            session_id = request.get("sessionID")
+            self.conversation = Conversation(cwd, agents, session_id) if session_id else Conversation(cwd, agents)
         conversation = self.conversation
         active_agents = conversation.active_agents
         if not active_agents:
@@ -254,7 +243,36 @@ class Desktop:
                 self.send(request, "panes", panes=current)
         return kind
 
-    async def reply(self, request):
+    def forget_retry(self, name, task):
+        if self.retries.get(name) is task:
+            del self.retries[name]
+
+
+class Desktop:
+    def __init__(self):
+        self.path = config_path()
+        self.history = History(self.path)
+        self.sessions = {}
+        self.catalogs = set()
+        self.output_open = True
+
+    def send(self, request, kind, **fields):
+        if self.output_open:
+            try:
+                if "sessionID" in request:
+                    fields["sessionID"] = request["sessionID"]
+                print(json.dumps({"id": request["id"], "kind": kind, **fields}, ensure_ascii=True), flush=True)
+            except BrokenPipeError:
+                self.output_open = False
+
+    def configuration(self):
+        return {
+            "agents": [asdict(agent) for agent in read_config(self.path)],
+            "configPath": str(self.path),
+            "installed": [cli for cli in CLIS if shutil.which(cli)],
+        }
+
+    async def reply(self, request, session):
         try:
             action = request["action"]
             if action == "load":
@@ -262,14 +280,16 @@ class Desktop:
             elif action == "history":
                 self.send(request, "result", history=[asdict(item) for item in self.history.list()])
             elif action == "openHistory":
-                if self.running_turns():
+                if session.running_turns():
                     raise ValueError(tr(
                         "请在本轮结束后切换会话",
                         "Wait for the current turn to finish before switching conversations",
                     ))
                 conversation = self.history.open(request["conversationID"])
-                await self.close_sessions()
-                self.conversation = conversation
+                if request.get("sessionID", conversation.id) != conversation.id:
+                    raise ValueError(tr("会话 ID 不匹配", "Conversation IDs do not match"))
+                await session.close_sessions()
+                session.conversation = conversation
                 exchanges = [{
                     "prompt": exchange.prompt,
                     "images": [image.wire() for image in exchange.images],
@@ -290,13 +310,19 @@ class Desktop:
                 models = await model_choices(agent, cwd)
                 self.send(request, "result", models=[{"id": key, "label": value} for key, value in models.items()])
             elif action == "ask":
-                await self.send_turn(request)
+                await session.send_turn(request)
             elif action == "retryAgent":
-                await self.retry_agent(request)
+                await session.retry_agent(request)
             elif action == "exitAgent":
-                await self.exit_agent(request)
+                await session.exit_agent(request)
+            elif action == "closeSession":
+                if session.running_turns():
+                    raise ValueError(tr("会话正在运行", "The conversation is still running"))
+                await session.close_sessions()
+                del self.sessions[request.get("sessionID")]
+                self.send(request, "result")
             elif action == "reset":
-                if self.running_turns():
+                if session.running_turns():
                     raise ValueError(tr(
                         "请在本轮结束后开启新对话",
                         "Wait for the current turn to finish before starting a new conversation",
@@ -309,8 +335,8 @@ class Desktop:
                         "This agent has been removed",
                     ), **configuration)
                     return
-                await self.close_sessions()
-                self.conversation = None
+                await session.close_sessions()
+                session.conversation = None
                 self.send(request, "result", **configuration)
             else:
                 raise ValueError(tr(f"未知操作 {action}", f"Unknown action {action}"))
@@ -328,46 +354,49 @@ class Desktop:
                 request = json.loads(line)
                 # Tasks spawned for a turn retain the language of that request.
                 set_language(request.get("language"))
+                key = request.get("sessionID")
+                if "sessionID" in request and (not isinstance(key, str) or not re.fullmatch(r"[0-9a-f]{32}", key)):
+                    self.send(request, "error", message=tr("无效的会话 ID", "Invalid conversation ID"))
+                    continue
+                if key not in self.sessions:
+                    self.sessions[key] = DesktopSession(self.history, self.send)
+                session = self.sessions[key]
                 action = request["action"]
                 if action == "ask":
-                    if self.running_turns():
+                    if session.running_turns():
                         self.send(request, "error", message=tr("上一轮还在运行", "The previous turn is still running"))
                     else:
-                        self.turn = asyncio.create_task(self.reply(request))
+                        session.turn = asyncio.create_task(self.reply(request, session))
                         await asyncio.sleep(0)
                 elif action == "retryAgent":
                     name = request.get("agentName")
                     if not isinstance(name, str):
                         self.send(request, "error", message=tr("请指定要重试的 agent", "Specify which agent to retry"))
-                    elif name in self.retries and not self.retries[name].done():
+                    elif name in session.retries and not session.retries[name].done():
                         self.send(request, "error", message=tr("这个 agent 正在重试", "This agent is already retrying"))
                     else:
-                        task = asyncio.create_task(self.reply(request))
-                        self.retries[name] = task
-                        task.add_done_callback(lambda finished, name=name: self.forget_retry(name, finished))
+                        task = asyncio.create_task(self.reply(request, session))
+                        session.retries[name] = task
+                        task.add_done_callback(lambda finished, name=name, session=session: session.forget_retry(name, finished))
                         await asyncio.sleep(0)
                 elif action == "cancel":
-                    running = self.running_turns()
+                    running = session.running_turns()
                     for task in running:
                         task.cancel()
                     await asyncio.gather(*running, return_exceptions=True)
                 elif action == "models":
-                    task = asyncio.create_task(self.reply(request))
+                    task = asyncio.create_task(self.reply(request, session))
                     self.catalogs.add(task)
                     task.add_done_callback(self.catalogs.discard)
                 else:
-                    await self.reply(request)
+                    await self.reply(request, session)
         finally:
             transport.close()
-            tasks = [*self.catalogs, *self.running_turns()]
+            tasks = [*self.catalogs, *(task for session in self.sessions.values() for task in session.running_turns())]
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-            await self.close_sessions()
-
-    def forget_retry(self, name, task):
-        if self.retries.get(name) is task:
-            del self.retries[name]
+            await asyncio.gather(*(session.close_sessions() for session in self.sessions.values()))
 
 
 if __name__ == "__main__":
